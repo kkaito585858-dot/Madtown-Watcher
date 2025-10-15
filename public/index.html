@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>配信ウォッチャー</title>
+<style>
+  body {
+    font-family: sans-serif;
+    background: #111;
+    color: #fff;
+    text-align: center;
+  }
+  h1 { margin-top: 20px; }
+
+  #streamerList {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 15px;
+    padding: 0;
+    margin: 20px;
+    list-style: none;
+  }
+
+  .card {
+    background: #222;
+    border-radius: 25px;
+    padding: 10px;
+    width: 200px;
+    text-align: center;
+    box-shadow: 0 0 10px #000;
+    transition: transform 0.2s;
+    cursor: default;
+  }
+  .card:hover {
+    transform: scale(1.05);
+  }
+
+  .card > div:first-child {
+    font-weight: bold;
+    font-size: 1.1em;
+    margin-bottom: 8px;
+  }
+
+  .platforms {
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+    margin-top: 5px;
+    align-items: flex-start;
+    min-height: 120px; /* 高さ統一 */
+  }
+
+  .platform {
+    text-align: center;
+    cursor: default;
+    width: 80px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    position: relative; /* アイコン重ね表示用 */
+  }
+
+  .live, .offline {
+    min-height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .live {
+    color: #0f0;
+    font-weight: bold;
+    margin-top: 5px;
+    cursor: pointer;
+  }
+  .offline {
+    color: #888;
+    font-weight: normal;
+    margin-top: 5px;
+    cursor: default;
+  }
+
+  /* Twitchアイコン */
+  .platform.twitch img {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    object-fit: cover;
+    display: block;
+  }
+
+  /* YouTubeサムネ */
+  .platform.youtube img {
+    width: 120px;
+    height: 68px;
+    object-fit: cover;
+    border-radius: 8px;
+    background: #000;
+  }
+
+  /* 高さ統一用ラッパー */
+  .platform .img-wrapper {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 68px;
+  }
+
+  /* Twitch公式アイコン右下重ね */
+  .platform.twitch::after {
+    content: "";
+    position: absolute;
+    bottom: 42px;
+    right: 20px;
+    width: 16px;
+    height: 16px;
+    background: url('./img/twitch.png') no-repeat center/contain;
+    border-radius: 50%;
+  }
+
+  /* YouTube公式アイコン右下重ね */
+  .platform.youtube::after {
+    content: "";
+    position: absolute;
+    bottom: 28px;
+    right: -20px;
+    width: 18px;
+    height: 18px;
+    background: url('./img/youtube.png') no-repeat center/contain;
+  }
+</style>
+</head>
+<body>
+<h1>配信ウォッチャー</h1>
+
+<ul id="streamerList">
+  <li id="loading">読み込み中…</li>
+</ul>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const socket = io();
+const listEl = document.getElementById("streamerList");
+
+// === 読み込み中アニメーション ===
+listEl.innerHTML = "<li id='loading'>読み込み中</li>";
+let dots = 0;
+const loadingAnim = setInterval(() => {
+  dots = (dots + 1) % 4; // 0→1→2→3→0...
+  document.getElementById("loading").textContent = "読み込み中" + ".".repeat(dots);
+}, 500);
+
+// === ステータス受信 ===
+socket.on("statusUpdate", (statuses) => {
+  clearInterval(loadingAnim); // ← アニメーション停止
+  const loadingEl = document.getElementById("loading");
+  if (loadingEl) loadingEl.remove();
+  listEl.innerHTML = "";
+
+  statuses.forEach(s => {
+    const li = document.createElement("li");
+    li.className = "card";
+
+    // 名前
+    const nameEl = document.createElement("div");
+    nameEl.textContent = s.name;
+    li.appendChild(nameEl);
+
+    // プラットフォーム全体
+    const platformsEl = document.createElement("div");
+    platformsEl.className = "platforms";
+
+    // === Twitch ===
+    if (s.twitchLogin) {
+      const twitchEl = document.createElement("div");
+      twitchEl.className = "platform twitch";
+
+      const twitchWrapper = document.createElement("div");
+      twitchWrapper.className = "img-wrapper";
+
+      const twitchImg = document.createElement("img");
+      twitchImg.src = s.twitchIcon || "./img/placeholder_twitch.png";
+      twitchImg.onerror = () => twitchImg.src = "./img/placeholder_twitch.png";
+      twitchWrapper.appendChild(twitchImg);
+      twitchEl.appendChild(twitchWrapper);
+
+      const twitchStatus = document.createElement("div");
+      twitchStatus.textContent = s.twitchLive ? "LIVE" : "OFFLINE";
+      twitchStatus.className = s.twitchLive ? "live" : "offline";
+      twitchEl.appendChild(twitchStatus);
+
+      if (s.twitchLive) {
+        twitchEl.onclick = () => {
+          window.open(`https://www.twitch.tv/${s.twitchLogin}`, "_blank");
+        };
+      }
+
+      platformsEl.appendChild(twitchEl);
+    }
+
+    // === YouTube ===
+    if (s.youtubeIcon || s.youtubeLive) {
+      const ytEl = document.createElement("div");
+      ytEl.className = "platform youtube";
+
+      const ytWrapper = document.createElement("div");
+      ytWrapper.className = "img-wrapper";
+
+      const ytImg = document.createElement("img");
+      ytImg.src = s.youtubeIcon || "./img/placeholder_youtube.png";
+      ytImg.onerror = () => ytImg.src = "./img/placeholder_youtube.png";
+      ytWrapper.appendChild(ytImg);
+      ytEl.appendChild(ytWrapper);
+
+      const ytStatus = document.createElement("div");
+      ytStatus.textContent = s.youtubeLive ? "LIVE" : "OFFLINE";
+      ytStatus.className = s.youtubeLive ? "live" : "offline";
+      ytEl.appendChild(ytStatus);
+
+      if (s.youtubeLive && s.videoId) {
+        ytEl.onclick = () => {
+          window.open(`https://www.youtube.com/watch?v=${s.videoId}`, "_blank");
+        };
+      }
+
+      platformsEl.appendChild(ytEl);
+    }
+
+    // 表示対象があるときのみカード追加
+    if (platformsEl.children.length > 0) {
+      li.appendChild(platformsEl);
+      listEl.appendChild(li);
+    }
+  });
+
+  // もしstatusesが空なら「配信者が見つかりません」
+  if (statuses.length === 0) {
+    listEl.innerHTML = "<li>配信者が見つかりません</li>";
+  }
+});
+</script>
