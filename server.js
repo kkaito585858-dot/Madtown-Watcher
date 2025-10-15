@@ -3,138 +3,122 @@ import http from "http";
 import { Server } from "socket.io";
 import cron from "node-cron";
 import axios from "axios";
-import Parser from "rss-parser";
 import dotenv from "dotenv";
+import puppeteer from "puppeteer";
 import { streamers } from "./streamers.js";
 import { getTwitchData } from "./twitch-check.js";
 
 dotenv.config();
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
-const parser = new Parser();
 
 app.use(express.static("public"));
 
 /**
- * ✅ YouTubeライブ判定（RSS＋/liveページ）
- * - ライブ中のみ live = true
- * - 配信予定は検知しない
+ * Puppeteer版 YouTubeライブ判定
  */
-async function getYoutubeData(channelIdOrName) {
-  if (!channelIdOrName || channelIdOrName.trim() === "")
-    return { live: false, thumbnail: "", videoId: null, valid: false };
+async function getYoutubeDataPuppeteer(channelId) {
+  if (!channelId) return { live: false, videoId: null, thumbnail: "", valid: false };
 
+  let browser;
   try {
-    // RSSで最新動画取得
-    const feed = await parser.parseURL(
-      `https://www.youtube.com/feeds/videos.xml?channel_id=${channelIdOrName}`
-    );
+    browser = await puppeteer.launch({ headless: true });
+    const page = await browser.newPage();
 
-    const latest = feed.items?.[0];
-    const match = latest?.link?.match(/(?:v=|shorts\/)([a-zA-Z0-9_-]+)/);
-    const videoId = match ? match[1] : null;
+    await page.goto(`https://www.youtube.com/channel/${channelId}/live`, {
+      waitUntil: "domcontentloaded",
+      timeout: 60000, // タイムアウト60秒に延長
+    });
+
+    // ページから ytInitialData を取得
+    const data = await page.evaluate(() => {
+      try {
+        const scripts = Array.from(document.querySelectorAll("script"));
+        const initialDataScript = scripts.find(s => s.textContent.includes("ytInitialData"));
+        if (!initialDataScript) return null;
+        const jsonText = initialDataScript.textContent.match(/ytInitialData\s*=\s*(\{.*\});/)[1];
+        return JSON.parse(jsonText);
+      } catch {
+        return null;
+      }
+    });
 
     let live = false;
-    let liveVideoId = null;
+    let videoId = null;
 
-    // /live ページで実際に配信中かチェック
-    const url = `https://www.youtube.com/channel/${channelIdOrName}/live`;
-    try {
-      const res = await axios.get(url, {
-        headers: { "User-Agent": "Mozilla/5.0" },
-        timeout: 15000,
-      });
+    if (data) {
+      const videoRenderer =
+        data.contents?.twoColumnBrowseResultsRenderer?.tabs?.[0]?.tabRenderer?.content
+          ?.sectionListRenderer?.contents?.[0]?.itemSectionRenderer?.contents?.[0]
+          ?.shelfRenderer?.content?.expandedShelfContentsRenderer?.items?.[0]
+          ?.videoRenderer;
 
-      const html = res.data;
-      const idx = html.indexOf('"isLiveNow":');
-      if (idx !== -1) {
-        const flag = html.slice(idx, idx + 30).match(/"isLiveNow":(true|false)/);
-        if (flag && flag[1] === "true") {
-          live = true;
-          liveVideoId = videoId;
-        }
+      if (videoRenderer) {
+        live = true;
+        videoId = videoRenderer.videoId;
       }
-    } catch (err) {
-      console.warn(`YouTube /live check failed (${channelIdOrName}): ${err.message}`);
     }
 
-    const thumbnail = liveVideoId
-      ? `https://img.youtube.com/vi/${liveVideoId}/hqdefault.jpg`
-      : "";
+    const thumbnail = videoId ? `https://img.youtube.com/vi/${videoId}/hqdefault.jpg` : "";
 
-    return { live, thumbnail, videoId: liveVideoId, valid: true };
+    return { live, videoId, thumbnail, valid: true };
   } catch (err) {
-    console.error(`YouTube RSS error (${channelIdOrName}): ${err.message}`);
-    return { live: false, thumbnail: "", videoId: null, valid: false };
+    console.error("Puppeteer YouTube check failed:", err);
+    return { live: false, videoId: null, thumbnail: "", valid: false };
+  } finally {
+    if (browser) await browser.close();
   }
 }
 
 /**
- * ✅ 配信状況更新
+ * 配信状況更新（逐次処理＋同時実行防止）
  */
-async function updateStatuses() {
-  console.time("updateStatuses");
+let updateQueue = Promise.resolve();
 
-  try {
-    const results = await Promise.all(
-      streamers.map(async (streamer) => {
-        try {
-          const [twitchData, youtubeData] = await Promise.allSettled([
-            getTwitchData(streamer.twitch),
-            getYoutubeData(streamer.youtube),
-          ]);
+async function updateStatusesSequential() {
+  const results = [];
 
-          const twitch = twitchData.status === "fulfilled" ? twitchData.value : {};
-          const youtube = youtubeData.status === "fulfilled" ? youtubeData.value : {};
+  for (const streamer of streamers) {
+    try {
+      const twitchData = await getTwitchData(streamer.twitch);
+      const youtubeData = await getYoutubeDataPuppeteer(streamer.youtube);
 
-          return {
-            name: streamer.name,
-            // Twitch
-            twitchLogin: twitch.valid ? streamer.twitch : "",
-            twitchLive: twitch.valid ? twitch.live : false,
-            twitchIcon: twitch.valid ? twitch.profile_image_url : "",
-            // YouTube
-            youtubeLive: youtube.valid ? youtube.live : false,
-            youtubeIcon: youtube.valid ? youtube.thumbnail : "",
-            videoId: youtube.valid ? youtube.videoId : null,
-          };
-        } catch (err) {
-          console.error(`[updateStatuses] ${streamer.name} failed: ${err.message}`);
-          return {
-            name: streamer.name,
-            twitchLogin: "",
-            twitchLive: false,
-            twitchIcon: "",
-            youtubeLive: false,
-            youtubeIcon: "",
-            videoId: null,
-          };
-        }
-      })
-    );
-
-    io.emit("statusUpdate", results);
-  } catch (err) {
-    console.error("[updateStatuses] Global error:", err);
+      results.push({
+        name: streamer.name,
+        twitchLogin: twitchData.valid ? streamer.twitch : "",
+        twitchLive: twitchData.valid ? twitchData.live : false,
+        twitchIcon: twitchData.valid ? twitchData.profile_image_url : "",
+        youtubeLive: youtubeData.valid ? youtubeData.live : false,
+        youtubeIcon: youtubeData.valid ? youtubeData.thumbnail : "",
+        videoId: youtubeData.valid ? youtubeData.videoId : null,
+      });
+    } catch (err) {
+      console.error(`Error updating ${streamer.name}:`, err);
+    }
   }
 
-  console.timeEnd("updateStatuses");
+  io.emit("statusUpdate", results);
+}
+
+function scheduleUpdateStatuses() {
+  updateQueue = updateQueue.then(updateStatusesSequential);
 }
 
 // 🔁 1分ごとに更新
 cron.schedule("* * * * *", () => {
   console.log("[CRON] Updating stream statuses...");
-  updateStatuses();
+  scheduleUpdateStatuses();
 });
 
 // 🌐 クライアント接続時に即送信
 io.on("connection", (socket) => {
   console.log("Client connected");
-  updateStatuses();
+  scheduleUpdateStatuses();
 });
 
 // 🚀 サーバー起動
 server.listen(3000, () =>
-  console.log("✅ Server running on http://localhost:3000")
+  console.log("Server running on http://localhost:3000")
 );
