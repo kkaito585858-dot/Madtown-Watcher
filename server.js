@@ -17,14 +17,16 @@ const parser = new Parser();
 app.use(express.static("public"));
 
 /**
- * ✅ YouTubeライブ判定（RSS＋/liveページ）
+ * YouTubeライブ判定（RSS＋/liveページ）
+ * - ライブ中のみ live = true
+ * - 配信予定は検知しない
  */
 async function getYoutubeData(channelIdOrName) {
   if (!channelIdOrName || channelIdOrName.trim() === "")
     return { live: false, thumbnail: "", videoId: null, valid: false };
 
   try {
-    // RSSで最新動画取得
+    // RSSで最新動画取得（ライブ以外も取得可能）
     const feed = await parser.parseURL(
       `https://www.youtube.com/feeds/videos.xml?channel_id=${channelIdOrName}`
     );
@@ -33,23 +35,25 @@ async function getYoutubeData(channelIdOrName) {
     const match = latest?.link?.match(/(?:v=|shorts\/)([a-zA-Z0-9_-]+)/);
     const videoId = match ? match[1] : null;
 
-    // /liveページを取得してライブ判定
+    // 初期値
     let live = false;
-    let liveVideoId = videoId;
-    if (channelIdOrName && videoId) {
+    let liveVideoId = null;
+
+    // /liveページを取得してライブ中か判定
+    if (channelIdOrName) {
       try {
         const url = `https://www.youtube.com/channel/${channelIdOrName}/live`;
         const res = await axios.get(url, {
           headers: { "User-Agent": "Mozilla/5.0" },
-          timeout: 10000, // 10秒タイムアウト
+          timeout: 10000,
         });
         const html = res.data;
-        const liveMatch = html.match(
-          /<link rel="canonical" href="https:\/\/www\.youtube\.com\/watch\?v=([a-zA-Z0-9_-]+)"/
-        );
+
+        // JSON内のisLiveNowを正確に取得
+        const liveMatch = html.match(/"isLiveNow":(true|false)/);
         if (liveMatch) {
-          live = true;
-          liveVideoId = liveMatch[1];
+          live = liveMatch[1] === "true";
+          if (live) liveVideoId = videoId; // ライブ中のみ動画IDを設定
         }
       } catch (err) {
         console.warn(`YouTube check failed (${channelIdOrName}):`, err.message);
@@ -66,6 +70,7 @@ async function getYoutubeData(channelIdOrName) {
     return { live: false, thumbnail: "", videoId: null, valid: false };
   }
 }
+
 
 /**
  * ✅ 配信状況更新
